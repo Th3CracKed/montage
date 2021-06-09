@@ -1,0 +1,24 @@
+{
+  "name": "montage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "watch": "tsc-watch --onSuccess \"node build/index.js\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.0.20",
+    "fluent-ffmpeg": "^2.1.2",
+    "ytdl-core": "^4.8.2"
+  },
+  "devDependencies": {
+    "@types/fluent-ffmpeg": "^2.1.17",
+    "@types/node": "^15.12.2",
+    "tsc-watch": "^4.2.9",
+    "typescript": "^4.1.3"
+  }
+}
