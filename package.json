@@ -13,10 +13,13 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.0.20",
     "fluent-ffmpeg": "^2.1.2",
+    "fs-extra": "^10.0.0",
+    "youtube-dl-wrap": "^2.1.0",
     "ytdl-core": "^4.8.2"
   },
   "devDependencies": {
     "@types/fluent-ffmpeg": "^2.1.17",
+    "@types/fs-extra": "^9.0.11",
     "@types/node": "^15.12.2",
     "tsc-watch": "^4.2.9",
     "typescript": "^4.1.3"
