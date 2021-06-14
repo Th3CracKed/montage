@@ -10,7 +10,7 @@ import { CustomVideoFormat, Video } from './model';
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
     fsExtra.emptyDirSync('videos');
-    const videosFormats = await getHighestCommonVideosFormats(data);
+    const videosFormats = await getHighestVideosFormats(data);
     try {
         const videosPaths = await downloadDefinedVideoChunks(videosFormats);
         mergeVideos(videosPaths, 'videos/out.mp4');
@@ -21,46 +21,44 @@ import { CustomVideoFormat, Video } from './model';
 
 async function downloadDefinedVideoChunks(videosFormats: CustomVideoFormat[]) {
     console.log('Downloading Videos...');
-    const videoChunksPromises = videosFormats.map(async (video, index) => {
+    const videoChunksPromises = videosFormats.map(async (videoFormat, index) => {
         const videoPath = 'videos/' + index + '.mp4';
-        console.log(`Downloading : ${video.ytUrl} as ${videoPath}`);
-        await downloadYtVideo(videoPath, video);
-        console.log('Downloading finished for :', videoPath);
-        console.log('Cutting video for :', videoPath);
-        const isCut = await cutVideo(videoPath, video.start, video.duration);
+        await downloadYtVideo(videoPath, videoFormat);
+        const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
+        const isCut = await cutVideo(videoPath, tmpPath, videoFormat.start, videoFormat.duration);
         if (!isCut) {
             throw Error('Error while cutting video');
         }
-        console.log('Cutting finished for :', videoPath);
+        await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+        await scaleToFhdVideo(videoPath, tmpPath);
+        await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
         return videoPath;
     });
     return Promise.all(videoChunksPromises);
 }
 
-function downloadYtVideo(videoPath: string, video: CustomVideoFormat): Promise<void> {
+function downloadYtVideo(videoPath: string, videoFormat: CustomVideoFormat): Promise<void> {
+    console.log(`Downloading : ${videoFormat.ytUrl} as ${videoPath}`);
     return new Promise<void>(async (resolve, reject) => {
-        ytdl(video.ytUrl, { quality: 'highestvideo', filter: 'audioandvideo', format: video })
+        ytdl(videoFormat.ytUrl, { quality: 'highestvideo', filter: 'audioandvideo', format: videoFormat })
             .pipe(fsExtra.createWriteStream(videoPath))
-            .on('close', resolve)
+            .on('close', () => {
+                console.log('Downloading finished for :', videoPath);
+                resolve();
+            })
             .on('error', reject);
     });
 }
 
-async function getHighestCommonVideosFormats(videos: Video[]): Promise<CustomVideoFormat[]> {
-    const map: { [key: string]: CustomVideoFormat[]; } = {};
-    const promises = videos.map(async video => {
+async function getHighestVideosFormats(videos: Video[]): Promise<CustomVideoFormat[]> {
+    return Promise.all(videos.map(async video => {
         const videoInfo = await ytdl.getInfo(video.url);
-        const videosFormats = getUniqValidMp4VideosFormats(videoInfo.formats);
-        videosFormats.forEach(format => {
-            const { qualityLabel } = format;
-            map[qualityLabel] = [...(map[qualityLabel] || []), { ...format, ytUrl: video.url, start: video.start, duration: video.duration }];
-        });
-    });
-    await Promise.all(promises);
-    return chooseVideoFormatToDownload(map, videos.length);
+        const highestVideoFormat = getHighestValidVideoFormat(videoInfo.formats);
+        return { ...highestVideoFormat, ytUrl: video.url, start: video.start, duration: video.duration };
+    }));
 }
 
-function getUniqValidMp4VideosFormats(videosFormats: videoFormat[]) {
+function getHighestValidVideoFormat(videosFormats: ytdl.videoFormat[]) {
     const map = videosFormats.reduce((accMap: { [key: string]: ytdl.videoFormat }, videoFormat) => {
         const { qualityLabel, hasAudio, hasVideo, container } = videoFormat;
         const isValidVideoFormat = qualityLabel && hasAudio && hasVideo && container === 'mp4';
@@ -70,44 +68,54 @@ function getUniqValidMp4VideosFormats(videosFormats: videoFormat[]) {
         }
         return accMap;
     }, {});
-    return Object.values(map);
+    return chooseVideoFormatToDownload(map);
 }
 
-function chooseVideoFormatToDownload(map: { [key: string]: CustomVideoFormat[] }, numberOfVideos: number): CustomVideoFormat[] {
+function chooseVideoFormatToDownload(map: { [key: string]: ytdl.videoFormat }): ytdl.videoFormat {
     const resolutions = ['2160p60', '2160p', '1440p60', '1440p', '1080p60', '1080p', '720p60', '720p', '480p', '360p', '240p', '144p'];
     while (resolutions.length > 0) {
         const qualityLabel = resolutions.shift();
-        if (map[qualityLabel]?.length === numberOfVideos) {
+        if (map[qualityLabel]) {
             return map[qualityLabel];
         }
     }
 }
 
-function cutVideo(path: string, startTime: string, duration: string): Promise<boolean> {
+function cutVideo(path: string, outputPath: string, startTime: string, duration: string): Promise<boolean> {
+    console.log('Cutting video for :', path);
     return new Promise((resolve, reject) => {
-        const outputPath = path.replace('.mp4', '_tmp.mp4');
         ffmpeg(path)
             .setStartTime(startTime)
             .setDuration(duration)
             .output(outputPath)
             .on('end', async function (err: any) {
                 if (!err) {
-                    console.log('Conversion Done for :', path);
-                    try {
-                        await fsExtra.rm(path);
-                        await fsExtra.rename(outputPath, path);
-                        console.log('Renaming Done for :', path);
-                        resolve(true);
-                    } catch (err) {
-                        console.log('error : ', err);
-                        resolve(false);
-                    }
+                    console.log('Cutting Done for :', path);
+                    resolve(true);
+                } else {
+                    console.log('Cutting failed for :', path);
+                    resolve(false);
                 }
             })
             .on('error', function (err: any) {
                 console.log('error: ', err)
                 reject(err);
             }).run()
+    });
+}
+
+async function replaceOriginalVideoWithTmpVideo(path: string, outputPath: string) {
+    console.log('Renaming video for :', path);
+    return new Promise<void>(async (resolve, reject) => {
+        try {
+            await fsExtra.rm(path);
+            await fsExtra.rename(outputPath, path);
+            resolve();
+            console.log('Renaming Done for :', path);
+        } catch (err) {
+            console.log('error : ', err);
+            reject(err);
+        }
     });
 }
 
@@ -132,4 +140,26 @@ function chainVideos(videosPaths: string[]) {
     return remainingVideos.reduce((ffmpegAcc, currentVideo) => {
         return ffmpegAcc.input(currentVideo);
     }, ffmpeg(firstVideo));
+}
+
+function scaleToFhdVideo(videoPath: string, outputPath: string) {
+    console.log('Scaling video to fhd:', videoPath);
+    return new Promise<void>((resolve, reject) => {
+        ffmpeg(videoPath)
+            .output(outputPath)
+            .videoCodec('libx264')
+            .size('1920x1080')
+            .on('error', function (err) {
+                reject(err);
+                console.log('An error occurred while Scaling: ' + err.message, videoPath);
+            })
+            .on('progress', function (progress) {
+                console.log('Scaling... frames: ' + progress.frames, videoPath);
+            })
+            .on('end', function () {
+                console.log('Scaling finished for :', videoPath);
+                resolve();
+            })
+            .run();
+    })
 }
