@@ -3,15 +3,19 @@ import fsExtra from 'fs-extra';
 import ytdl from 'ytdl-core';
 
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 import ffmpeg from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
+    ffmpeg.setFfprobePath(ffprobePath);
     fsExtra.emptyDirSync('videos');
     try {
         const videosPaths = await downloadDefinedVideoChunks(data);
+        const { height, width } = await getHighestVideoResolutions(videosPaths);
+        await scaleVideos(videosPaths, height, width);
         mergeVideos(videosPaths, 'videos/out.mp4');
     } catch (err) {
         console.log(err);
@@ -23,17 +27,19 @@ async function downloadDefinedVideoChunks(videosFormats: Video[]) {
     const videoChunksPromises = videosFormats.map(async (video, index) => {
         const videoPath = 'videos/' + index + '.mp4';
         await downloadYtVideo(videoPath, video.url);
-        const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-        const isCut = await cutVideo(videoPath, tmpPath, video.start, video.duration);
-        if (!isCut) {
-            throw Error('Error while cutting video');
-        }
-        await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
-        await scaleToFhdVideo(videoPath, tmpPath);
-        await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+        await cutVideoReplaceOriginal(videoPath, video);
         return videoPath;
     });
     return Promise.all(videoChunksPromises);
+}
+
+async function cutVideoReplaceOriginal(videoPath: string, video: Video) {
+    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
+    const isCut = await cutVideo(videoPath, tmpPath, video.start, video.duration);
+    if (!isCut) {
+        throw Error('Error while cutting video');
+    }
+    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
 }
 
 function downloadYtVideo(videoPath: string, url: string): Promise<void> {
@@ -142,13 +148,36 @@ function chainVideos(videosPaths: string[]) {
     }, ffmpeg(firstVideo));
 }
 
-function scaleToFhdVideo(videoPath: string, outputPath: string) {
+
+function getVideoResolution(videoPath: string) {
+    return new Promise<{ height: number; width: number; }>((resolve, reject) => {
+        ffmpeg.ffprobe(videoPath, function (err, metadata) {
+            if (err) {
+                console.error(err);
+            } else {
+                // metadata should contain 'width', 'height' and 'display_aspect_ratio'
+                console.log(metadata);
+                const videoStream = metadata?.streams?.find(s => s.codec_type === 'video');
+                if (!videoStream) {
+                    reject('Video Stream not found');
+                }
+                const { height, width } = videoStream;
+                if (!height || !width) {
+                    reject(`Height and/or width undefined not found, height = ${height} and width = ${width}`);
+                }
+                resolve({ height, width });
+            }
+        });
+    });
+}
+
+function scaleVideo(videoPath: string, outputPath: string, size: string) {
     console.log('Scaling video to fhd:', videoPath);
     return new Promise<void>((resolve, reject) => {
         ffmpeg(videoPath)
             .output(outputPath)
             .videoCodec('libx264')
-            .size('1920x1080')
+            .size(size)
             .on('error', function (err) {
                 reject(err);
                 console.log('An error occurred while Scaling: ' + err.message, videoPath);
@@ -163,3 +192,34 @@ function scaleToFhdVideo(videoPath: string, outputPath: string) {
             .run();
     })
 }
+
+function getHighestVideoResolutions(videosPaths: string[]): Promise<{ height: number; width: number; }> {
+    return videosPaths.reduce<Promise<{ height: number; width: number; }>>(async (highestResolution, videoPath) => {
+        try {
+            const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
+            const { height: previousHighestHeight = 0, width: previousHighestWidth = 0 } = await highestResolution;
+            const isNewResolutionHigher = currentHeight < previousHighestHeight && currentWidth < previousHighestWidth;
+            return isNewResolutionHigher ? highestResolution : { height: currentHeight, width: currentWidth };
+        } catch (err) {
+            console.log(err);
+            return highestResolution;
+        }
+    }, Promise.resolve({ height: 0, width: 0 }));
+}
+
+async function scaleVideos(videosPaths: string[], targetHeight: number, targetWidth: number) {
+    for await (const videoPath of videosPaths) {
+        const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
+        if (currentHeight === targetHeight && currentWidth === targetWidth) {
+            return;
+        }
+        await scaleVideoReplaceOriginal(videoPath, `${targetWidth}x${targetHeight}`);
+    }
+}
+
+async function scaleVideoReplaceOriginal(videoPath: string, size: string) {
+    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
+    await scaleVideo(videoPath, tmpPath, size);
+    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+}
+
