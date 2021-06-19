@@ -4,7 +4,7 @@ import ytdl from 'ytdl-core';
 
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-import ffmpeg from 'fluent-ffmpeg'
+import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
 
@@ -28,6 +28,7 @@ async function downloadDefinedVideoChunks(videosFormats: Video[]) {
         const videoPath = 'videos/' + index + '.mp4';
         await downloadYtVideo(videoPath, video.url);
         await cutVideoReplaceOriginal(videoPath, video);
+        await addTextReplaceOriginal(videoPath, video);
         return videoPath;
     });
     return Promise.all(videoChunksPromises);
@@ -38,6 +39,16 @@ async function cutVideoReplaceOriginal(videoPath: string, video: Video) {
     const isCut = await cutVideo(videoPath, tmpPath, video.start, video.duration);
     if (!isCut) {
         throw Error('Error while cutting video');
+    }
+    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+}
+
+async function addTextReplaceOriginal(videoPath: string, video: Video) {
+    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
+    // TODO decide font size based on resolution
+    const isTextAdded = await addText(videoPath, video.text, 100, tmpPath);
+    if (!isTextAdded) {
+        throw Error('Error while adding text to the video');
     }
     await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
 }
@@ -84,6 +95,41 @@ function downloadYtVideo(videoPath: string, url: string): Promise<void> {
                 resolve();
             })
             .on('error', reject);
+    });
+}
+
+function addText(videoPath: string, text: string, fontSize: number, outputPath: string): Promise<boolean> {
+    console.log(`adding text to ${videoPath}`);
+
+    return new Promise<boolean>(async (resolve, reject) => {
+        let textFilter: AudioVideoFilter = {
+            filter: 'drawtext',
+            options: {
+                // fontfile: rootPath_1.default + '/assets/fonts/arial.ttf',
+                text,
+                fontsize: fontSize,
+                fontcolor: 'white',
+                x: '(main_w/2-text_w/2)',
+                y: '(main_h-(text_h*1.2))',
+                box: "1",
+                boxcolor: "black@0.5",
+                boxborderw: "5",
+            },
+        };
+        ffmpeg(videoPath)
+            .videoFilters([textFilter])
+            .output(outputPath)
+            .on('end', function (err) {
+                if (!err) {
+                    console.log('End Prosessing');
+                    resolve(true);
+                } else {
+                    console.log('End Prosessing for :', videoPath);
+                    resolve(false);
+                }
+            })
+            .on('error', reject)
+            .run();
     });
 }
 
