@@ -57,39 +57,8 @@ function downloadYtVideo(videoPath: string, url: string): Promise<void> {
     console.log(`Downloading : ${url} as ${videoPath}`);
 
     return new Promise<void>(async (resolve, reject) => {
-        const cp = require('child_process');
-        const stream = require('stream');
-
-        const result = new stream.PassThrough({ highWaterMark: 1024 * 512 });
-        const info = await ytdl.getInfo(url);
-        const audioStream = ytdl.downloadFromInfo(info, { quality: 'highestaudio' });
-        const videoStream = ytdl.downloadFromInfo(info, { quality: 'highestvideo' });
-        // create the ffmpeg process for muxing
-        const ffmpegProcess = cp.spawn(ffmpegPath, [
-            // supress non-crucial messages
-            '-loglevel', '8', '-hide_banner',
-            // input audio and video by pipe
-            '-i', 'pipe:3', '-i', 'pipe:4',
-            // map audio and video correspondingly
-            '-map', '0:a', '-map', '1:v',
-            // no need to change the codec
-            '-c', 'copy',
-            // output mp4 and pipe
-            '-f', 'matroska', 'pipe:5'
-        ], {
-            // no popup window for Windows users
-            windowsHide: true,
-            stdio: [
-                // silence stdin/out, forward stderr,
-                'inherit', 'inherit', 'inherit',
-                // and pipe audio, video, output
-                'pipe', 'pipe', 'pipe'
-            ]
-        });
-        audioStream.pipe(ffmpegProcess.stdio[3]);
-        videoStream.pipe(ffmpegProcess.stdio[4]);
-        ffmpegProcess.stdio[5].pipe(result);
-        result.pipe(fsExtra.createWriteStream(videoPath))
+        ytdl(url, { quality: 'highestvideo', filter: 'audioandvideo' })
+        .pipe(fsExtra.createWriteStream(videoPath))
             .on('close', () => {
                 console.log('Downloading finished for :', videoPath);
                 resolve();
