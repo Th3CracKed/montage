@@ -13,7 +13,7 @@ import { Video } from './model';
     ffmpeg.setFfprobePath(ffprobePath);
     fsExtra.emptyDirSync('videos');
     try {
-        const videosPaths = await downloadDefinedVideoChunks(data);
+        const videosPaths = await downloadDefinedVideoChunks();
         const { height, width } = await getHighestVideoResolutions(videosPaths);
         await scaleVideos(videosPaths, height, width);
         mergeVideos(videosPaths, 'videos/out.mp4');
@@ -22,16 +22,26 @@ import { Video } from './model';
     }
 })()
 
-async function downloadDefinedVideoChunks(videosFormats: Video[]) {
-    console.log('Downloading Videos...');
-    const videoChunksPromises = videosFormats.map(async (video, index) => {
-        const videoPath = 'videos/' + index + '.mp4';
+async function downloadDefinedVideoChunks() {
+    const funcs = data.map((video, index) => {
+        return () => downloadDefinedVideoChunk(video, index);
+    });
+    const videosPaths = await chainAllTasksInSeries(funcs);
+    return videosPaths;
+}
+
+async function downloadDefinedVideoChunk(video: Video, index) {
+    const videoPath = 'videos/' + index + '.mp4';
+    try {
+
         await downloadYtVideo(videoPath, video.url);
         await cutVideoReplaceOriginal(videoPath, video);
         await addTextReplaceOriginal(videoPath, video);
-        return videoPath;
-    });
-    return Promise.all(videoChunksPromises);
+    } catch (err) {
+        console.log('problem downloading ' + videoPath);
+        console.log(err);
+    }
+    return videoPath;
 }
 
 async function cutVideoReplaceOriginal(videoPath: string, video: Video) {
@@ -238,3 +248,12 @@ async function scaleVideoReplaceOriginal(videoPath: string, size: string) {
     await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
 }
 
+async function chainAllTasksInSeries<T>(tasksFactory: (() => Promise<T>)[]): Promise<T[]> {
+    return tasksFactory.reduce((promiseChain, currentTask) => {
+        return promiseChain.then(chainResults =>
+            currentTask().then(currentResult =>
+                [...chainResults, currentResult]
+            )
+        );
+    }, Promise.resolve([]));
+}
