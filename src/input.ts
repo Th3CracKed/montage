@@ -25,12 +25,12 @@ const videos: Video[] = [
         "duration": "20",
         "text": "Ratchet: Deadlocked 2005"
     },
-    {
-        "url": "https://www.youtube.com/watch?v=_LptCBbd87k",
-        "start": "00:02:00",
-        "duration": "20",
-        "text": "Ratchet and Clank: Size Matters 2007"
-    },
+    // {
+    //     "url": "https://www.youtube.com/watch?v=_LptCBbd87k",
+    //     "start": "00:02:00",
+    //     "duration": "20",
+    //     "text": "Ratchet and Clank: Size Matters 2007"
+    // },
     {
         "url": "https://www.youtube.com/watch?v=nu9lmT5dawY",
         "start": "00:07:30",

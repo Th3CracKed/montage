@@ -7,13 +7,14 @@ const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
+import { formatDuration } from './utils';
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
     ffmpeg.setFfprobePath(ffprobePath);
     fsExtra.emptyDirSync('videos');
     try {
-        const videosPaths = await downloadDefinedVideoChunks();
+        const videosPaths = await processVideos();
         const { height, width } = await getHighestVideoResolutions(videosPaths);
         await scaleVideos(videosPaths, height, width);
         mergeVideos(videosPaths, 'videos/out.mp4');
@@ -22,20 +23,19 @@ import { Video } from './model';
     }
 })()
 
-async function downloadDefinedVideoChunks() {
+async function processVideos() {
     const funcs = data.map((video, index) => {
-        return () => downloadDefinedVideoChunk(video, index);
+        return () => processVideo(video, index);
     });
     const videosPaths = await chainAllTasksInSeries(funcs);
     return videosPaths;
 }
 
-async function downloadDefinedVideoChunk(video: Video, index) {
+async function processVideo(video: Video, index: number) {
     const videoPath = 'videos/' + index + '.mp4';
     try {
-
-        await downloadYtVideo(videoPath, video.url);
-        await cutVideoReplaceOriginal(videoPath, video);
+        const directUrl = await getDirectStreamUrlFromYt(video.url);
+        await downloadYtVideoChunk(videoPath, directUrl, video.start, formatDuration(video.duration));
         await addTextReplaceOriginal(videoPath, video);
     } catch (err) {
         console.log('problem downloading ' + videoPath);
@@ -44,13 +44,60 @@ async function downloadDefinedVideoChunk(video: Video, index) {
     return videoPath;
 }
 
-async function cutVideoReplaceOriginal(videoPath: string, video: Video) {
-    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-    const isCut = await cutVideo(videoPath, tmpPath, video.start, video.duration);
-    if (!isCut) {
-        throw Error('Error while cutting video');
+async function getDirectStreamUrlFromYt(url: string) {
+    const info = await ytdl.getInfo(url);
+    const highestFormat = getHighestAudioVideoFormat(info);
+    if (!highestFormat) {
+        throw new Error('highest format not available for ' + url);
     }
-    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+    return highestFormat.url;
+}
+
+function getHighestAudioVideoFormat(info: ytdl.videoInfo) {
+    return info.formats.reduce((accHighestFormat, format) => {
+        if (format.hasAudio && format.hasVideo && (!accHighestFormat || format.height > accHighestFormat.height)) {
+            return format;
+        } else {
+            return accHighestFormat;
+        }
+    }, undefined);
+}
+
+function downloadYtVideoChunk(videoPath: string, directUrl: string, start: string, duration: string) {
+    return new Promise<string>(async (resolve, reject) => {
+        const cp = require('child_process');
+        // create the ffmpeg process for muxing
+        const ffmpegProcess = cp.spawn(ffmpegPath, [
+            // supress non-crucial messages
+            '-loglevel', '8', '-hide_banner',
+            // video start
+            '-ss', start,
+            // input video by url
+            '-i', directUrl,
+            // video duration,
+            '-t', duration,
+            // no need to change the codec
+            '-c', 'copy',
+            // output mp4 and pipe
+            '-f', 'matroska', 'pipe:3'
+        ], {
+            // no popup window for Windows users
+            windowsHide: true,
+            stdio: [
+                // silence stdin/out, forward stderr,
+                'inherit', 'inherit', 'inherit',
+                // and pipe audio, video, output
+                'pipe', 'pipe', 'pipe'
+            ]
+        });
+        console.log(`Downloading : ${directUrl} as ${videoPath}`);
+        ffmpegProcess.stdio[3].pipe(fsExtra.createWriteStream(videoPath))
+            .on('close', function () {
+                console.log('Downloading finished for :', videoPath);
+                resolve(videoPath);
+            })
+            .on('error', reject);
+    })
 }
 
 async function addTextReplaceOriginal(videoPath: string, video: Video) {
@@ -61,20 +108,6 @@ async function addTextReplaceOriginal(videoPath: string, video: Video) {
         throw Error('Error while adding text to the video');
     }
     await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
-}
-
-function downloadYtVideo(videoPath: string, url: string): Promise<void> {
-    console.log(`Downloading : ${url} as ${videoPath}`);
-
-    return new Promise<void>(async (resolve, reject) => {
-        ytdl(url, { quality: 'highestvideo', filter: 'audioandvideo' })
-        .pipe(fsExtra.createWriteStream(videoPath))
-            .on('close', () => {
-                console.log('Downloading finished for :', videoPath);
-                resolve();
-            })
-            .on('error', reject);
-    });
 }
 
 function addText(videoPath: string, text: string, fontSize: number, outputPath: string): Promise<boolean> {
@@ -109,29 +142,6 @@ function addText(videoPath: string, text: string, fontSize: number, outputPath: 
             })
             .on('error', reject)
             .run();
-    });
-}
-
-function cutVideo(path: string, outputPath: string, startTime: string, duration: string): Promise<boolean> {
-    console.log('Cutting video for :', path);
-    return new Promise((resolve, reject) => {
-        ffmpeg(path)
-            .setStartTime(startTime)
-            .setDuration(duration)
-            .output(outputPath)
-            .on('end', async function (err: any) {
-                if (!err) {
-                    console.log('Cutting Done for :', path);
-                    resolve(true);
-                } else {
-                    console.log('Cutting failed for :', path);
-                    resolve(false);
-                }
-            })
-            .on('error', function (err: any) {
-                console.log('error: ', err)
-                reject(err);
-            }).run()
     });
 }
 
