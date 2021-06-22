@@ -1,6 +1,6 @@
 import fsExtra from 'fs-extra';
-
-import ytdl from 'ytdl-core';
+const util = require('util');
+const execPromise = util.promisify(require('child_process').exec);
 
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
@@ -8,6 +8,7 @@ import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
 import { formatDuration } from './utils';
+
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
@@ -45,22 +46,9 @@ async function processVideo(video: Video, index: number) {
 }
 
 async function getDirectStreamUrlFromYt(url: string) {
-    const info = await ytdl.getInfo(url);
-    const highestFormat = getHighestAudioVideoFormat(info);
-    if (!highestFormat) {
-        throw new Error('highest format not available for ' + url);
-    }
-    return highestFormat.url;
-}
-
-function getHighestAudioVideoFormat(info: ytdl.videoInfo) {
-    return info.formats.reduce((accHighestFormat, format) => {
-        if (format.hasAudio && format.hasVideo && (!accHighestFormat || format.height > accHighestFormat.height)) {
-            return format;
-        } else {
-            return accHighestFormat;
-        }
-    }, undefined);
+    const result = await execPromise(`youtube-dl -f best --youtube-skip-dash-manifest -g ${url}`)
+    const video_url = result.stdout;
+    return video_url;
 }
 
 function downloadYtVideoChunk(videoPath: string, directUrl: string, start: string, duration: string) {
