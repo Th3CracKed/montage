@@ -13,8 +13,10 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.0.20",
     "@ffprobe-installer/ffprobe": "^1.1.0",
+    "execa": "^5.1.1",
     "fluent-ffmpeg": "^2.1.2",
-    "fs-extra": "^10.0.0"
+    "fs-extra": "^10.0.0",
+    "is-unix": "^1.0.0"
   },
   "devDependencies": {
     "@types/fluent-ffmpeg": "^2.1.17",

@@ -1,14 +1,15 @@
 import fsExtra from 'fs-extra';
-const util = require('util');
-const execPromise = util.promisify(require('child_process').exec);
 
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
-import { formatDuration } from './utils';
+import { formatDuration, getSecondsFromDuration } from './utils';
+import dargs from './libs/dargs';
 
+import execa from 'execa';
+import { YOUTUBE_DL_PATH } from './libs/constants';
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
@@ -35,8 +36,9 @@ async function processVideos() {
 async function processVideo(video: Video, index: number) {
     const videoPath = 'videos/' + index + '.mp4';
     try {
-        const directUrl = await getDirectStreamUrlFromYt(video.url);
-        await downloadYtVideoChunk(videoPath, directUrl, video.start, formatDuration(video.duration));
+        const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url);
+        console.log(`Downloading ${video.url} as ${videoPath}`);
+        await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
         await addTextReplaceOriginal(videoPath, video);
     } catch (err) {
         console.log('problem downloading ' + videoPath);
@@ -46,46 +48,25 @@ async function processVideo(video: Video, index: number) {
 }
 
 async function getDirectStreamUrlFromYt(url: string) {
-    const result = await execPromise(`youtube-dl -f best --youtube-skip-dash-manifest -g ${url}`)
-    const video_url = result.stdout;
-    return video_url;
+    const args = (url: string, flags: any) =>
+        [].concat(url, dargs(flags, { useEquals: false })).filter(Boolean)
+    const getUrl = (url: string, flags: any, opts?: execa.Options<string>) => execa(YOUTUBE_DL_PATH, args(url, flags), opts);
+    const { stdout: result } = await getUrl(url, {
+        'format': 'bestvideo+bestaudio',
+        'youtube-skip-dash-manifest': true,
+        'get-url': true
+    });
+    return result.split('\n');
 }
 
-function downloadYtVideoChunk(videoPath: string, directUrl: string, start: string, duration: string) {
-    return new Promise<string>(async (resolve, reject) => {
-        const cp = require('child_process');
-        // create the ffmpeg process for muxing
-        const ffmpegProcess = cp.spawn(ffmpegPath, [
-            // supress non-crucial messages
-            '-loglevel', '8', '-hide_banner',
-            // video start
-            '-ss', start,
-            // input video by url
-            '-i', directUrl,
-            // video duration,
-            '-t', duration,
-            // no need to change the codec
-            '-c', 'copy',
-            // output mp4 and pipe
-            '-f', 'matroska', 'pipe:3'
-        ], {
-            // no popup window for Windows users
-            windowsHide: true,
-            stdio: [
-                // silence stdin/out, forward stderr,
-                'inherit', 'inherit', 'inherit',
-                // and pipe audio, video, output
-                'pipe', 'pipe', 'pipe'
-            ]
-        });
-        console.log(`Downloading : ${directUrl} as ${videoPath}`);
-        ffmpegProcess.stdio[3].pipe(fsExtra.createWriteStream(videoPath))
-            .on('close', function () {
-                console.log('Downloading finished for :', videoPath);
-                resolve(videoPath);
-            })
-            .on('error', reject);
-    })
+async function downloadYtVideoChunk(videoPath: string, videoUrl: string, audioUrl: string, start: string, duration: string) {
+    const audioParams = audioUrl ? ['-ss', start, '-i', audioUrl] : [];
+    const audioMappingParams = audioUrl ? ['-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-c:a'] : ['-c']
+    const [startVideoAt, cutParams] = getSecondsFromDuration(start) > 10 ? [getSecondsFromDuration(start) - 10, ['-ss', '10']] : [getSecondsFromDuration(start), []];
+    await execa(ffmpegPath, [
+        '-ss', formatDuration(startVideoAt), '-i', videoUrl, ...audioParams,
+        ...cutParams, '-t', duration, ...audioMappingParams, 'copy', videoPath
+    ])
 }
 
 async function addTextReplaceOriginal(videoPath: string, video: Video) {

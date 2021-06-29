@@ -16,3 +16,11 @@ export function formatDuration(seconds: number | string): string {
     }
     return parts.reverse().join(':')
 }
+
+
+export function getSecondsFromDuration(duration: string): number {
+    const array = duration.split(":").map(s => Number(s));
+
+    const seconds = array[0] * 3600 + array[1] * 60 + (+array[2]);
+    return seconds;
+}
