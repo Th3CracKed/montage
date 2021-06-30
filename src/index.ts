@@ -47,12 +47,18 @@ async function processVideo(video: Video, index: number) {
     return videoPath;
 }
 
+function args(url: string, flags: any) {
+    return [].concat(url, dargs(flags, { useEquals: false })).filter(Boolean)
+}
+
+function getUrl(url: string, flags: any, opts?: execa.Options<string>) {
+    return execa(YOUTUBE_DL_PATH, args(url, flags), opts);
+}
+
+
 async function getDirectStreamUrlFromYt(url: string) {
-    const args = (url: string, flags: any) =>
-        [].concat(url, dargs(flags, { useEquals: false })).filter(Boolean)
-    const getUrl = (url: string, flags: any, opts?: execa.Options<string>) => execa(YOUTUBE_DL_PATH, args(url, flags), opts);
     const { stdout: result } = await getUrl(url, {
-        'format': 'bestvideo+bestaudio',
+        'format': 'bestvideo+bestaudio/best',
         'youtube-skip-dash-manifest': true,
         'get-url': true
     });
