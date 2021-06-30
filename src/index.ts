@@ -10,33 +10,34 @@ import dargs from './libs/dargs';
 
 import execa from 'execa';
 import { YOUTUBE_DL_PATH } from './libs/constants';
+import ytdl from 'ytdl-core';
+
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
     ffmpeg.setFfprobePath(ffprobePath);
     fsExtra.emptyDirSync('videos');
     try {
-        const videosPaths = await processVideos();
-        const { height, width } = await getHighestVideoResolutions(videosPaths);
-        await scaleVideos(videosPaths, height, width);
+        const height = await getHighestVideosHeight(data);
+        const videosPaths = await processVideos(height);
         mergeVideos(videosPaths, 'videos/out.mp4');
     } catch (err) {
         console.log(err);
     }
 })()
 
-async function processVideos() {
+async function processVideos(height: string) {
     const funcs = data.map((video, index) => {
-        return () => processVideo(video, index);
+        return () => processVideo(video, index, height);
     });
     const videosPaths = await chainAllTasksInSeries(funcs);
     return videosPaths;
 }
 
-async function processVideo(video: Video, index: number) {
+async function processVideo(video: Video, index: number, height: string) {
     const videoPath = 'videos/' + index + '.mp4';
     try {
-        const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url);
+        const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url, height);
         console.log(`Downloading ${video.url} as ${videoPath}`);
         await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
         await addTextReplaceOriginal(videoPath, video);
@@ -55,10 +56,68 @@ function getUrl(url: string, flags: any, opts?: execa.Options<string>) {
     return execa(YOUTUBE_DL_PATH, args(url, flags), opts);
 }
 
+async function getHighestVideosHeight(videos: Video[]): Promise<string> {
+    console.log('Choosing Videos Height...');
+    const videosHeights = await getAvailableVideosHeights(videos);
+    const map = countByHeight(videosHeights);
+    const possibleQualities = getHeightsAvailableOnAllVideos(map, videos.length)
+    const height = chooseTopHeight(possibleQualities);
+    console.log(`${height} selected as best video height possible`);
+    return height;
+}
 
-async function getDirectStreamUrlFromYt(url: string) {
+function getAvailableVideosHeights(videos: Video[]): Promise<string[]> {
+    return videos.reduce(async (accArray: Promise<string[]>, video) => {
+        const videoHeights = await getAvailableVideoHeights(video.url);
+        return [...await accArray, ...videoHeights];
+    }, Promise.resolve([]));
+}
+
+function getHeightsAvailableOnAllVideos(map: { [key: string]: number; }, length: number): { [key: string]: number; } {
+    return Object.keys(map).reduce((acc: { [key: string]: number; }, height) => {
+        if (map[height] === length) {
+            acc[height] = map[height];
+        }
+        return acc;
+    }, {})
+}
+
+async function getAvailableVideoHeights(url: string): Promise<string[]> {
+    const videoInfo = await ytdl.getInfo(url);
+    return extractHeights(videoInfo.formats)
+}
+
+function extractHeights(formats: ytdl.videoFormat[]): string[] {
+    const map = formats.reduce((acc: { [key: number]: number }, format) => {
+        const { height } = format;
+        if (height) {
+            acc[height] = height;
+        }
+        return acc;
+    }, {});
+    return Object.keys(map);
+}
+
+function countByHeight(videosFormats: string[]) {
+    return videosFormats.reduce((accMap: { [key: string]: number }, height) => {
+        accMap[height] = accMap[height] ? accMap[height] + 1 : 1;
+        return accMap;
+    }, {});
+}
+
+function chooseTopHeight(map: { [key: string]: number }): string {
+    const resolutions = ['2160', '2160', '1440', '1440', '1080', '1080', '720', '720', '480', '360', '240', '144'];
+    while (resolutions.length > 0) {
+        const height = resolutions.shift();
+        if (map[height]) {
+            return height;
+        }
+    }
+}
+
+async function getDirectStreamUrlFromYt(url: string, height: string) {
     const { stdout: result } = await getUrl(url, {
-        'format': 'bestvideo+bestaudio/best',
+        'format': `bestvideo[height=${height}]+bestaudio/best[height=${height}]`,
         'youtube-skip-dash-manifest': true,
         'get-url': true
     });
@@ -156,81 +215,6 @@ function chainVideos(videosPaths: string[]) {
     return remainingVideos.reduce((ffmpegAcc, currentVideo) => {
         return ffmpegAcc.input(currentVideo);
     }, ffmpeg(firstVideo));
-}
-
-
-function getVideoResolution(videoPath: string) {
-    return new Promise<{ height: number; width: number; }>((resolve, reject) => {
-        ffmpeg.ffprobe(videoPath, function (err, metadata) {
-            if (err) {
-                console.error(err);
-            } else {
-                // metadata should contain 'width', 'height' and 'display_aspect_ratio'
-                console.log(metadata);
-                const videoStream = metadata?.streams?.find(s => s.codec_type === 'video');
-                if (!videoStream) {
-                    reject('Video Stream not found');
-                }
-                const { height, width } = videoStream;
-                if (!height || !width) {
-                    reject(`Height and/or width undefined not found, height = ${height} and width = ${width}`);
-                }
-                resolve({ height, width });
-            }
-        });
-    });
-}
-
-function scaleVideo(videoPath: string, outputPath: string, size: string) {
-    console.log('Scaling video to fhd:', videoPath);
-    return new Promise<void>((resolve, reject) => {
-        ffmpeg(videoPath)
-            .output(outputPath)
-            .videoCodec('libx264')
-            .size(size)
-            .on('error', function (err) {
-                reject(err);
-                console.log('An error occurred while Scaling: ' + err.message, videoPath);
-            })
-            .on('progress', function (progress) {
-                console.log('Scaling... frames: ' + progress.frames, videoPath);
-            })
-            .on('end', function () {
-                console.log('Scaling finished for :', videoPath);
-                resolve();
-            })
-            .run();
-    })
-}
-
-function getHighestVideoResolutions(videosPaths: string[]): Promise<{ height: number; width: number; }> {
-    return videosPaths.reduce<Promise<{ height: number; width: number; }>>(async (highestResolution, videoPath) => {
-        try {
-            const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
-            const { height: previousHighestHeight = 0, width: previousHighestWidth = 0 } = await highestResolution;
-            const isNewResolutionHigher = currentHeight < previousHighestHeight && currentWidth < previousHighestWidth;
-            return isNewResolutionHigher ? highestResolution : { height: currentHeight, width: currentWidth };
-        } catch (err) {
-            console.log(err);
-            return highestResolution;
-        }
-    }, Promise.resolve({ height: 0, width: 0 }));
-}
-
-async function scaleVideos(videosPaths: string[], targetHeight: number, targetWidth: number) {
-    for await (const videoPath of videosPaths) {
-        const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
-        if (currentHeight === targetHeight && currentWidth === targetWidth) {
-            return;
-        }
-        await scaleVideoReplaceOriginal(videoPath, `${targetWidth}x${targetHeight}`);
-    }
-}
-
-async function scaleVideoReplaceOriginal(videoPath: string, size: string) {
-    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-    await scaleVideo(videoPath, tmpPath, size);
-    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
 }
 
 async function chainAllTasksInSeries<T>(tasksFactory: (() => Promise<T>)[]): Promise<T[]> {
