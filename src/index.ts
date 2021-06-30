@@ -20,30 +20,36 @@ import ytdl from 'ytdl-core';
     try {
         const height = await getHighestVideosHeight(data);
         const videosPaths = await processVideos(height);
-        mergeVideos(videosPaths, 'videos/out.mp4');
+        const filteredVideoPaths = videosPaths.filter(vPath => !!vPath);
+        mergeVideos(filteredVideoPaths, 'videos/out.mp4');
     } catch (err) {
         console.log(err);
     }
 })()
 
 async function processVideos(height: string) {
+    const addingTextPromises: Promise<void>[] = [];
     const funcs = data.map((video, index) => {
-        return () => processVideo(video, index, height);
+        return () => processVideo(video, index, height, addingTextPromises);
     });
     const videosPaths = await chainAllTasksInSeries(funcs);
+    console.log('Waiting for text adding task to finish...');
+    await Promise.all(addingTextPromises);
+    console.log('Text added !');
     return videosPaths;
 }
 
-async function processVideo(video: Video, index: number, height: string) {
+async function processVideo(video: Video, index: number, height: string, promises: Promise<void>[]) {
     const videoPath = 'videos/' + index + '.mp4';
     try {
         const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url, height);
         console.log(`Downloading ${video.url} as ${videoPath}`);
         await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
-        await addTextReplaceOriginal(videoPath, video);
+        promises.push(addTextReplaceOriginal(videoPath, video));
     } catch (err) {
-        console.log('problem downloading ' + videoPath);
         console.log(err);
+        console.log('problem downloading ' + videoPath);
+        return undefined;
     }
     return videoPath;
 }
@@ -166,13 +172,8 @@ function addText(videoPath: string, text: string, fontSize: number, outputPath: 
             .videoFilters([textFilter])
             .output(outputPath)
             .on('end', function (err) {
-                if (!err) {
-                    console.log('End Prosessing');
-                    resolve(true);
-                } else {
-                    console.log('End Prosessing for :', videoPath);
-                    resolve(false);
-                }
+                console.log('End Processing for :', videoPath);
+                resolve(!err);
             })
             .on('error', reject)
             .run();
