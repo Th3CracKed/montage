@@ -12,6 +12,7 @@ import execa from 'execa';
 import { YOUTUBE_DL_PATH } from './libs/constants';
 import ytdl from 'ytdl-core';
 
+const DOWNLOAD_RETRY_ATTEMPT = 5;
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
@@ -20,8 +21,7 @@ import ytdl from 'ytdl-core';
     try {
         const height = await getHighestVideosHeight(data);
         const videosPaths = await processVideos(height);
-        const filteredVideoPaths = videosPaths.filter(vPath => !!vPath);
-        mergeVideos(filteredVideoPaths, 'videos/out.mp4');
+        mergeVideos(videosPaths, 'videos/out.mp4');
     } catch (err) {
         console.log(err);
     }
@@ -29,26 +29,30 @@ import ytdl from 'ytdl-core';
 
 async function processVideos(height: string) {
     const addingTextPromises: Promise<void>[] = [];
-    const funcs = data.map((video, index) => {
-        return () => processVideo(video, index, height, addingTextPromises);
+    const funcs = data.map((video, index) => () => {
+        const videoPath = 'videos/' + index + '.mp4';
+        return processVideo(video, videoPath, height, addingTextPromises);
     });
     const videosPaths = await chainAllTasksInSeries(funcs);
     console.log('Waiting for text adding task to finish...');
     await Promise.all(addingTextPromises);
     console.log('Text added !');
-    return videosPaths;
+    return videosPaths.filter(videoPath => !!videoPath);
 }
 
-async function processVideo(video: Video, index: number, height: string, promises: Promise<void>[]) {
-    const videoPath = 'videos/' + index + '.mp4';
+async function processVideo(video: Video, videoPath: string, height: string, addingTextPromises: Promise<void>[], attempt = 0): Promise<string> {
     try {
         const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url, height);
         console.log(`Downloading ${video.url} as ${videoPath}`);
         await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
-        promises.push(addTextReplaceOriginal(videoPath, video));
+        addingTextPromises.push(addTextReplaceOriginal(videoPath, video));
     } catch (err) {
-        console.log(err);
-        console.log('problem downloading ' + videoPath);
+        console.log(err); 
+        console.log(`Problem downloading ${video.url} as ${videoPath}`);
+        if (attempt < DOWNLOAD_RETRY_ATTEMPT) {
+            console.log(`Attempt Number ${attempt + 1} to download ${video.url}`);
+            return processVideo(video, videoPath, height, addingTextPromises, attempt + 1);
+        }
         return undefined;
     }
     return videoPath;
