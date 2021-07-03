@@ -1,46 +1,143 @@
 import fsExtra from 'fs-extra';
 
-import ytdl from 'ytdl-core';
-
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
+import { formatDuration, getSecondsFromDuration } from './utils';
+import dargs from './libs/dargs';
+
+import execa from 'execa';
+import { YOUTUBE_DL_PATH } from './libs/constants';
+import ytdl from 'ytdl-core';
+
 
 (async () => {
     ffmpeg.setFfmpegPath(ffmpegPath)
     ffmpeg.setFfprobePath(ffprobePath);
     fsExtra.emptyDirSync('videos');
     try {
-        const videosPaths = await downloadDefinedVideoChunks(data);
-        const { height, width } = await getHighestVideoResolutions(videosPaths);
-        await scaleVideos(videosPaths, height, width);
-        mergeVideos(videosPaths, 'videos/out.mp4');
+        const height = await getHighestVideosHeight(data);
+        const videosPaths = await processVideos(height);
+        const filteredVideoPaths = videosPaths.filter(vPath => !!vPath);
+        mergeVideos(filteredVideoPaths, 'videos/out.mp4');
     } catch (err) {
         console.log(err);
     }
 })()
 
-async function downloadDefinedVideoChunks(videosFormats: Video[]) {
-    console.log('Downloading Videos...');
-    const videoChunksPromises = videosFormats.map(async (video, index) => {
-        const videoPath = 'videos/' + index + '.mp4';
-        await downloadYtVideo(videoPath, video.url);
-        await cutVideoReplaceOriginal(videoPath, video);
-        await addTextReplaceOriginal(videoPath, video);
-        return videoPath;
+async function processVideos(height: string) {
+    const addingTextPromises: Promise<void>[] = [];
+    const funcs = data.map((video, index) => {
+        return () => processVideo(video, index, height, addingTextPromises);
     });
-    return Promise.all(videoChunksPromises);
+    const videosPaths = await chainAllTasksInSeries(funcs);
+    console.log('Waiting for text adding task to finish...');
+    await Promise.all(addingTextPromises);
+    console.log('Text added !');
+    return videosPaths;
 }
 
-async function cutVideoReplaceOriginal(videoPath: string, video: Video) {
-    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-    const isCut = await cutVideo(videoPath, tmpPath, video.start, video.duration);
-    if (!isCut) {
-        throw Error('Error while cutting video');
+async function processVideo(video: Video, index: number, height: string, promises: Promise<void>[]) {
+    const videoPath = 'videos/' + index + '.mp4';
+    try {
+        const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url, height);
+        console.log(`Downloading ${video.url} as ${videoPath}`);
+        await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
+        promises.push(addTextReplaceOriginal(videoPath, video));
+    } catch (err) {
+        console.log(err);
+        console.log('problem downloading ' + videoPath);
+        return undefined;
     }
-    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
+    return videoPath;
+}
+
+function args(url: string, flags: any) {
+    return [].concat(url, dargs(flags, { useEquals: false })).filter(Boolean)
+}
+
+function getUrl(url: string, flags: any, opts?: execa.Options<string>) {
+    return execa(YOUTUBE_DL_PATH, args(url, flags), opts);
+}
+
+async function getHighestVideosHeight(videos: Video[]): Promise<string> {
+    console.log('Choosing Videos Height...');
+    const videosHeights = await getAvailableVideosHeights(videos);
+    const map = countByHeight(videosHeights);
+    const possibleQualities = getHeightsAvailableOnAllVideos(map, videos.length)
+    const height = chooseTopHeight(possibleQualities);
+    console.log(`${height} selected as best video height possible`);
+    return height;
+}
+
+function getAvailableVideosHeights(videos: Video[]): Promise<string[]> {
+    return videos.reduce(async (accArray: Promise<string[]>, video) => {
+        const videoHeights = await getAvailableVideoHeights(video.url);
+        return [...await accArray, ...videoHeights];
+    }, Promise.resolve([]));
+}
+
+function getHeightsAvailableOnAllVideos(map: { [key: string]: number; }, length: number): { [key: string]: number; } {
+    return Object.keys(map).reduce((acc: { [key: string]: number; }, height) => {
+        if (map[height] === length) {
+            acc[height] = map[height];
+        }
+        return acc;
+    }, {})
+}
+
+async function getAvailableVideoHeights(url: string): Promise<string[]> {
+    const videoInfo = await ytdl.getInfo(url);
+    return extractHeights(videoInfo.formats)
+}
+
+function extractHeights(formats: ytdl.videoFormat[]): string[] {
+    const map = formats.reduce((acc: { [key: number]: number }, format) => {
+        const { height } = format;
+        if (height) {
+            acc[height] = height;
+        }
+        return acc;
+    }, {});
+    return Object.keys(map);
+}
+
+function countByHeight(videosFormats: string[]) {
+    return videosFormats.reduce((accMap: { [key: string]: number }, height) => {
+        accMap[height] = accMap[height] ? accMap[height] + 1 : 1;
+        return accMap;
+    }, {});
+}
+
+function chooseTopHeight(map: { [key: string]: number }): string {
+    const resolutions = ['2160', '2160', '1440', '1440', '1080', '1080', '720', '720', '480', '360', '240', '144'];
+    while (resolutions.length > 0) {
+        const height = resolutions.shift();
+        if (map[height]) {
+            return height;
+        }
+    }
+}
+
+async function getDirectStreamUrlFromYt(url: string, height: string) {
+    const { stdout: result } = await getUrl(url, {
+        'format': `bestvideo[height=${height}]+bestaudio/best[height=${height}]`,
+        'youtube-skip-dash-manifest': true,
+        'get-url': true
+    });
+    return result.split('\n');
+}
+
+async function downloadYtVideoChunk(videoPath: string, videoUrl: string, audioUrl: string, start: string, duration: string) {
+    const audioParams = audioUrl ? ['-ss', start, '-i', audioUrl] : [];
+    const audioMappingParams = audioUrl ? ['-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-c:a'] : ['-c']
+    const [startVideoAt, cutParams] = getSecondsFromDuration(start) > 10 ? [getSecondsFromDuration(start) - 10, ['-ss', '10']] : [getSecondsFromDuration(start), []];
+    await execa(ffmpegPath, [
+        '-ss', formatDuration(startVideoAt), '-i', videoUrl, ...audioParams,
+        ...cutParams, '-t', duration, ...audioMappingParams, 'copy', videoPath
+    ])
 }
 
 async function addTextReplaceOriginal(videoPath: string, video: Video) {
@@ -51,51 +148,6 @@ async function addTextReplaceOriginal(videoPath: string, video: Video) {
         throw Error('Error while adding text to the video');
     }
     await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
-}
-
-function downloadYtVideo(videoPath: string, url: string): Promise<void> {
-    console.log(`Downloading : ${url} as ${videoPath}`);
-
-    return new Promise<void>(async (resolve, reject) => {
-        const cp = require('child_process');
-        const stream = require('stream');
-
-        const result = new stream.PassThrough({ highWaterMark: 1024 * 512 });
-        const info = await ytdl.getInfo(url);
-        const audioStream = ytdl.downloadFromInfo(info, { quality: 'highestaudio' });
-        const videoStream = ytdl.downloadFromInfo(info, { quality: 'highestvideo' });
-        // create the ffmpeg process for muxing
-        const ffmpegProcess = cp.spawn(ffmpegPath, [
-            // supress non-crucial messages
-            '-loglevel', '8', '-hide_banner',
-            // input audio and video by pipe
-            '-i', 'pipe:3', '-i', 'pipe:4',
-            // map audio and video correspondingly
-            '-map', '0:a', '-map', '1:v',
-            // no need to change the codec
-            '-c', 'copy',
-            // output mp4 and pipe
-            '-f', 'matroska', 'pipe:5'
-        ], {
-            // no popup window for Windows users
-            windowsHide: true,
-            stdio: [
-                // silence stdin/out, forward stderr,
-                'inherit', 'inherit', 'inherit',
-                // and pipe audio, video, output
-                'pipe', 'pipe', 'pipe'
-            ]
-        });
-        audioStream.pipe(ffmpegProcess.stdio[3]);
-        videoStream.pipe(ffmpegProcess.stdio[4]);
-        ffmpegProcess.stdio[5].pipe(result);
-        result.pipe(fsExtra.createWriteStream(videoPath))
-            .on('close', () => {
-                console.log('Downloading finished for :', videoPath);
-                resolve();
-            })
-            .on('error', reject);
-    });
 }
 
 function addText(videoPath: string, text: string, fontSize: number, outputPath: string): Promise<boolean> {
@@ -120,39 +172,11 @@ function addText(videoPath: string, text: string, fontSize: number, outputPath: 
             .videoFilters([textFilter])
             .output(outputPath)
             .on('end', function (err) {
-                if (!err) {
-                    console.log('End Prosessing');
-                    resolve(true);
-                } else {
-                    console.log('End Prosessing for :', videoPath);
-                    resolve(false);
-                }
+                console.log('End Processing for :', videoPath);
+                resolve(!err);
             })
             .on('error', reject)
             .run();
-    });
-}
-
-function cutVideo(path: string, outputPath: string, startTime: string, duration: string): Promise<boolean> {
-    console.log('Cutting video for :', path);
-    return new Promise((resolve, reject) => {
-        ffmpeg(path)
-            .setStartTime(startTime)
-            .setDuration(duration)
-            .output(outputPath)
-            .on('end', async function (err: any) {
-                if (!err) {
-                    console.log('Cutting Done for :', path);
-                    resolve(true);
-                } else {
-                    console.log('Cutting failed for :', path);
-                    resolve(false);
-                }
-            })
-            .on('error', function (err: any) {
-                console.log('error: ', err)
-                reject(err);
-            }).run()
     });
 }
 
@@ -194,78 +218,12 @@ function chainVideos(videosPaths: string[]) {
     }, ffmpeg(firstVideo));
 }
 
-
-function getVideoResolution(videoPath: string) {
-    return new Promise<{ height: number; width: number; }>((resolve, reject) => {
-        ffmpeg.ffprobe(videoPath, function (err, metadata) {
-            if (err) {
-                console.error(err);
-            } else {
-                // metadata should contain 'width', 'height' and 'display_aspect_ratio'
-                console.log(metadata);
-                const videoStream = metadata?.streams?.find(s => s.codec_type === 'video');
-                if (!videoStream) {
-                    reject('Video Stream not found');
-                }
-                const { height, width } = videoStream;
-                if (!height || !width) {
-                    reject(`Height and/or width undefined not found, height = ${height} and width = ${width}`);
-                }
-                resolve({ height, width });
-            }
-        });
-    });
+async function chainAllTasksInSeries<T>(tasksFactory: (() => Promise<T>)[]): Promise<T[]> {
+    return tasksFactory.reduce((promiseChain, currentTask) => {
+        return promiseChain.then(chainResults =>
+            currentTask().then(currentResult =>
+                [...chainResults, currentResult]
+            )
+        );
+    }, Promise.resolve([]));
 }
-
-function scaleVideo(videoPath: string, outputPath: string, size: string) {
-    console.log('Scaling video to fhd:', videoPath);
-    return new Promise<void>((resolve, reject) => {
-        ffmpeg(videoPath)
-            .output(outputPath)
-            .videoCodec('libx264')
-            .size(size)
-            .on('error', function (err) {
-                reject(err);
-                console.log('An error occurred while Scaling: ' + err.message, videoPath);
-            })
-            .on('progress', function (progress) {
-                console.log('Scaling... frames: ' + progress.frames, videoPath);
-            })
-            .on('end', function () {
-                console.log('Scaling finished for :', videoPath);
-                resolve();
-            })
-            .run();
-    })
-}
-
-function getHighestVideoResolutions(videosPaths: string[]): Promise<{ height: number; width: number; }> {
-    return videosPaths.reduce<Promise<{ height: number; width: number; }>>(async (highestResolution, videoPath) => {
-        try {
-            const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
-            const { height: previousHighestHeight = 0, width: previousHighestWidth = 0 } = await highestResolution;
-            const isNewResolutionHigher = currentHeight < previousHighestHeight && currentWidth < previousHighestWidth;
-            return isNewResolutionHigher ? highestResolution : { height: currentHeight, width: currentWidth };
-        } catch (err) {
-            console.log(err);
-            return highestResolution;
-        }
-    }, Promise.resolve({ height: 0, width: 0 }));
-}
-
-async function scaleVideos(videosPaths: string[], targetHeight: number, targetWidth: number) {
-    for await (const videoPath of videosPaths) {
-        const { height: currentHeight, width: currentWidth } = await getVideoResolution(videoPath);
-        if (currentHeight === targetHeight && currentWidth === targetWidth) {
-            return;
-        }
-        await scaleVideoReplaceOriginal(videoPath, `${targetWidth}x${targetHeight}`);
-    }
-}
-
-async function scaleVideoReplaceOriginal(videoPath: string, size: string) {
-    const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-    await scaleVideo(videoPath, tmpPath, size);
-    await replaceOriginalVideoWithTmpVideo(videoPath, tmpPath);
-}
-
