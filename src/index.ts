@@ -44,9 +44,10 @@ async function processVideo(video: Video, videoPath: string, height: string, add
         const [videoUrl, audioUrl] = await getDirectStreamUrlFromYt(video.url, height);
         console.log(`Downloading ${video.url} as ${videoPath}`);
         await downloadYtVideoChunk(videoPath, videoUrl, audioUrl, video.start, video.duration);
-        addingTextPromises.push(addTextReplaceOriginal(videoPath, video));
+        const fontSize = Math.floor(Number(height) / 20);
+        addingTextPromises.push(addTextReplaceOriginal(videoPath, video, fontSize));
     } catch (err) {
-        console.log(err); 
+        console.log(err);
         console.log(`Problem downloading ${video.url} as ${videoPath}`);
         if (attempt < DOWNLOAD_RETRY_ATTEMPT) {
             console.log(`Attempt Number ${attempt + 1} to download ${video.url}`);
@@ -143,10 +144,9 @@ async function downloadYtVideoChunk(videoPath: string, videoUrl: string, audioUr
     ])
 }
 
-async function addTextReplaceOriginal(videoPath: string, video: Video) {
+async function addTextReplaceOriginal(videoPath: string, video: Video, fontSize: number) {
     const tmpPath = videoPath.replace('.mp4', '_tmp.mp4');
-    // TODO decide font size based on resolution
-    const isTextAdded = await addText(videoPath, video.text, 100, tmpPath);
+    const isTextAdded = await addText(videoPath, video.text, fontSize, tmpPath);
     if (!isTextAdded) {
         throw Error('Error while adding text to the video');
     }
