@@ -1,7 +1,5 @@
 import fsExtra from 'fs-extra';
 
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 import ffmpeg, { AudioVideoFilter } from 'fluent-ffmpeg'
 import data from './input';
 import { Video } from './model';
@@ -11,12 +9,13 @@ import dargs from './libs/dargs';
 import execa from 'execa';
 import { YOUTUBE_DL_PATH } from './libs/constants';
 import ytdl from 'ytdl-core';
+import ffmpegPath from 'ffmpeg-static';
+const ffmpegForMergingPath = require('@ffmpeg-installer/ffmpeg').path;
 
 const DOWNLOAD_RETRY_ATTEMPT = 5;
 
 (async () => {
-    ffmpeg.setFfmpegPath(ffmpegPath)
-    ffmpeg.setFfprobePath(ffprobePath);
+    ffmpeg.setFfmpegPath(ffmpegForMergingPath)
     fsExtra.emptyDirSync('videos');
     try {
         const height = await getHighestVideosHeight(data);
